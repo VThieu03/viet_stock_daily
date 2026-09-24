@@ -82,8 +82,59 @@ def fetch_stock_data(ticker: str):
         return None
 
 
+def generate_quantitative_briefing(stock_summaries: list) -> str:
+    """Tạo bản tin phân tích kỹ thuật định lượng dự phòng (khi toàn bộ API AI bên ngoài bị nghẽn mạng)"""
+    above_ma20 = [s for s in stock_summaries if "TRÊN" in s.get("trend_ma", "")]
+    below_ma20 = [s for s in stock_summaries if "DƯỚI" in s.get("trend_ma", "")]
+    strong_vol = [s for s in stock_summaries if float(s.get("vol_status", "0").split("x")[0]) >= 1.1]
+    
+    sections = []
+    sections.append("🎯 *1. NHẬN ĐỊNH TỔNG QUAN THỊ TRƯỜNG:*")
+    market_tone = "Tích cực (Kênh tăng duy trì)" if len(above_ma20) >= len(below_ma20) else "Phân hóa & Thận trọng"
+    sections.append(f"• Tín hiệu xu hướng: *{market_tone}* với {len(above_ma20)}/{len(stock_summaries)} mã giữ vững trên đường MA20.")
+    sections.append(f"• Trạng thái dòng tiền: {'Dòng tiền chủ động gia tăng ở một số mã trụ.' if strong_vol else 'Thanh khoản ở mức cân bằng, dòng tiền thận trọng tích lũy.'}")
+    
+    sections.append("\n🚀 *2. ĐIỂM NÓNG CỔ PHIẾU DANH MỤC:*")
+    for s in stock_summaries:
+        ticker = s['ticker']
+        p = s['price']
+        chg = s['change_pct']
+        rsi = s['rsi']
+        trend = s['trend_ma']
+        vol = s['vol_status']
+        icon = "🟢" if chg > 0 else ("🔴" if chg < 0 else "🟡")
+        
+        if rsi >= 70:
+            status_note = "⚠️ Vùng Quá Mua - Hạn chế mua đuổi, canh chốt lời ngắn hạn."
+        elif rsi <= 35:
+            status_note = "💎 Vùng Quá Bán - Chờ tín hiệu dòng tiền tạo đáy để gom vị thế."
+        elif "TRÊN" in trend:
+            status_note = "✅ Giữ vững xu hướng Tăng trên MA20 - Nắm giữ vị thế, canh gia tăng."
+        else:
+            status_note = "⏳ Dưới MA20 - Tích lũy điều chỉnh, kiên nhẫn chờ vượt kháng cự."
+            
+        sections.append(f"{icon} *{ticker}* ({p:,.0f} đ, {chg:+0.2f}%): RSI={rsi} | {trend} | Vol={vol}\n   ↳ {status_note}")
+
+    sections.append("\n💡 *3. CHIẾN LƯỢC HÀNH ĐỘNG HÔM NAY:*")
+    top_picks = [s for s in stock_summaries if "TRÊN" in s['trend_ma'] and 45 <= s['rsi'] <= 68]
+    if top_picks:
+        pick = top_picks[0]
+        buy_range = f"{pick['price'] * 0.985:,.0f} - {pick['price'] * 1.005:,.0f} đ"
+        target = f"{pick['price'] * 1.08:,.0f} đ (+8%)"
+        stoploss = f"{pick['ma20'] * 0.96:,.0f} đ (-4%)"
+        sections.append(f"• *Mã ưu tiên quan sát:* *{pick['ticker']}*")
+        sections.append(f"  - Vùng canh mua: `{buy_range}`")
+        sections.append(f"  - Giá mục tiêu ngắn hạn: `{target}`")
+        sections.append(f"  - Ngưỡng cắt lỗ (Stoploss): `{stoploss}`")
+    else:
+        sections.append("• Tỷ trọng khuyến nghị: Duy trì 50-70% cổ phiếu, ưu tiên nhóm dẫn dắt.")
+
+    sections.append("\n⚠️ *Ghi chú:* Phân tích định lượng dựa trên mô hình chỉ báo kỹ thuật RSI, MA20, MA50 & Volume Ratio.")
+    return "\n".join(sections)
+
+
 def ask_gemini(stock_summaries: list, api_key: str) -> str:
-    """Gửi dữ liệu kỹ thuật vào Gemini Pro / Flash để phân tích chuyên sâu với retry tự động"""
+    """Gửi dữ liệu kỹ thuật vào Gemini AI phân tích chuyên sâu với cơ chế Multi-Model Cascading Fallback"""
     data_text = "\n".join([
         f"- Mã {s['ticker']}: Giá {s['price']:,.0f} VND ({s['change_pct']:+0.2f}%), "
         f"RSI={s['rsi']}, Vị thế: {s['trend_ma']}, Khối lượng={s['vol_status']}"
@@ -105,36 +156,52 @@ Hãy soạn một BẢN TIN PHÂN TÍCH BUỔI SÁNG gửi nhà đầu tư qua T
 
 Yêu cầu định dạng: Ngắn gọn, có gạch đầu dòng, icon emoji nổi bật, dễ đọc nhanh trên điện thoại."""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key}"
+    candidate_models = [
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
+        "gemini-3.1-flash-lite",
+        "gemma-4-26b-a4b-it",
+    ]
+    
     payload = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.4,
             "maxOutputTokens": 1500
         }
     }
+    encoded_data = json.dumps(payload).encode('utf-8')
     
-    req = urllib.request.Request(
-        url, 
-        data=json.dumps(payload).encode('utf-8'), 
-        headers={'content-type': 'application/json'}
-    )
-    
-    # Retry tối đa 4 lần nếu gặp quá tải tức thời
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                res_data = json.loads(resp.read().decode())
-                return res_data['candidates'][0]['content']['parts'][0]['text']
-        except Exception as e:
-            print(f"[!] Lần thử {attempt+1} gặp lỗi: {e}. Đang thử lại sau 2 giây...")
-            time.sleep(2)
-
-    return "⚠️ Hiện tại dịch vụ phân tích AI đang bảo trì. Vui lòng thử lại sau ít phút."
+    for model_name in candidate_models:
+        clean_model = model_name if not model_name.startswith("models/") else model_name.replace("models/", "")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+        req = urllib.request.Request(url, data=encoded_data, headers={'content-type': 'application/json'})
+        
+        for sub_attempt in range(2):
+            try:
+                print(f"[*] Đang kết nối AI qua model: {clean_model} (lần {sub_attempt + 1})...")
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    res_data = json.loads(resp.read().decode())
+                    text_result = res_data['candidates'][0]['content']['parts'][0]['text']
+                    if text_result and len(text_result.strip()) > 50:
+                        print(f"[+] Model {clean_model} đã phân tích thành công!")
+                        return text_result
+            except urllib.error.HTTPError as e:
+                print(f"[!] Model {clean_model} trả về mã lỗi HTTP {e.code}: {e.reason}")
+                if e.code in (503, 429, 404):
+                    print(f"    -> Đang tự động chuyển sang model dự phòng kế tiếp...")
+                    time.sleep(1)
+                    break
+                time.sleep(2)
+            except Exception as e:
+                print(f"[!] Lỗi khi gọi model {clean_model}: {e}")
+                time.sleep(1)
+                
+    print("[!] Các model AI đám mây đang quá tải tạm thời. Kích hoạt bộ phân tích định lượng dự phòng...")
+    return generate_quantitative_briefing(stock_summaries)
 
 
 def send_telegram(message: str, bot_token: str, chat_id: str):
