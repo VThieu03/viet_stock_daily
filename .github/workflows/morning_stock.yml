@@ -1,0 +1,28 @@
+name: Vietnam Stock Daily Morning Briefing
+
+on:
+  schedule:
+    # 01:00 UTC = 08:00 AM Vietnam Time (UTC+7), Monday to Friday
+    - cron: '0 1 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  analyze_and_report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Vietnam Stock Analysis & Deliver to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python vietstock_gemini_bot.py
